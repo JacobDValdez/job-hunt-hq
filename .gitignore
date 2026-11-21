@@ -1,0 +1,36 @@
+# Installed packages (anyone can reinstall with `npm install`)
+node_modules/
+
+# Everything personal the app stores: database, Gmail sign-in token,
+# resume, cover letters, company logos
+data/
+
+# Secret keys. Only .env.example (blank template) is shared.
+.env
+.env.*
+!.env.example
+
+# Safety net for stray secret or data files outside data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+google-token.json
+*token*.json
+credentials*.json
+client_secret*.json
+*.pem
+*.key
+
+# Personal notes kept in this folder
+My Experience Log.md
+Resume Wording Suggestions.md
+
+# Local tool settings (contain this PC's folder paths)
+.claude/
+
+# OS and editor clutter
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log

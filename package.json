@@ -1,0 +1,22 @@
+{
+  "name": "job-hunt-hq",
+  "version": "1.0.0",
+  "description": "Local job-search helper: pulls job leads, tracks applications, reads Gmail replies, and shows interviews on a calendar.",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "private": true,
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.12.0",
+    "@fontsource/inter": "^5.3.0",
+    "@fontsource/playfair-display": "^5.3.0",
+    "express": "^5.3.0",
+    "playwright-core": "^1.65.1",
+    "zod": "^4.6.7"
+  }
+}
