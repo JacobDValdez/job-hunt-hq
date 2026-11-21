@@ -13,7 +13,8 @@ I built it with **Claude Code** (AI-assisted development) while job hunting for 
 | | |
 |---|---|
 | **Finds leads** | Pulls openings from 8+ sources: We Work Remotely, Himalayas, RemoteOK, Remotive, Arbeitnow, Adzuna, and company hiring pages on Greenhouse, Lever and Ashby. Filters by keywords, location and "work from anywhere". |
-| **Tracks the pipeline** | Every job moves through clear stages (new lead → saved → applied → interview → offer or rejected), like deals in a CRM. |
+| **Tracks the pipeline** | Every job moves through clear stages (new lead → saved → applied → interview → offer or rejected), like deals in a CRM. Search answers "did I already apply there?" in a second. |
+| **Stops duplicate applications** | The same job often comes back from another job board, an alert email or a repost. The app matches leads to past applications by company, job title and posting link, marks them "Already applied" with the date and status, and asks before you apply twice. |
 | **Reads replies for me** | Connects to Gmail (read-only) and sorts job emails into Interview, Rejection, Offer, Recruiter, Confirmation and Job alert, then updates the matching application automatically. |
 | **Books interviews** | Pulls interview times out of emails onto a calendar, with one-click export to Google Calendar, Outlook or Apple Calendar. |
 | **Pre-fills applications** | Opens the real application form, fills in my details, uploads my resume and drafts a cover letter for that job. **It never clicks Submit.** I review every answer and submit myself. |

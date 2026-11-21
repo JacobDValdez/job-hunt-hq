@@ -164,7 +164,7 @@ async function dashboard() {
 }
 
 // ---------- jobs ----------
-const jobFilter = { status: 'new', q: '', source: '', place: '', sort: 'match' };
+const jobFilter = { status: 'new', q: '', source: '', place: '', sort: 'match', hide: '' };
 async function jobs() {
   const p = new URLSearchParams(jobFilter);
   const [data, s] = await Promise.all([api(`/api/jobs?${p}`), api('/api/settings')]);
@@ -181,9 +181,13 @@ async function jobs() {
       <select id="place">${[['', 'Any location'], ['remote', 'Remote'], ['anywhere', 'Work from anywhere']].map(([v, l]) => `<option value="${v}" ${v === jobFilter.place ? 'selected' : ''}>${l}</option>`).join('')}</select>
       <select id="st">${['new', 'saved', 'applied', 'dismissed', 'all'].map((s) => `<option ${s === jobFilter.status ? 'selected' : ''} value="${s}">${s === 'new' ? 'New' : s[0].toUpperCase() + s.slice(1)}</option>`).join('')}</select>
       <select id="src"><option value="">All sources</option>${data.sources.map((s) => `<option value="${esc(s.source)}" ${s.source === jobFilter.source ? 'selected' : ''}>${esc(s.source)} (${s.n})</option>`).join('')}</select>
+      <label class="check-inline"><input type="checkbox" id="hideApplied" ${jobFilter.hide === 'applied' ? 'checked' : ''}> Hide jobs I already applied to</label>
       <span class="muted">${data.jobs.length}${data.jobs.length === 300 ? '+' : ''} jobs</span>
     </div>
     ${lf ? sourceErrors(lf) : ''}
+    ${data.alreadyApplied && jobFilter.hide !== 'applied' ? `<div class="notice warn applied-note">
+      <span><b>${data.alreadyApplied} of your leads ${data.alreadyApplied === 1 ? 'is a job' : 'are jobs'} you already applied to.</b> The same job often shows up again from another job board, an alert email or a repost. Each one is marked with “Already applied”.</span>
+      <span class="row"><button id="hideDupes">Hide them</button><button class="primary" id="moveDupes">Move them to Applied</button></span></div>` : ''}
     <div class="list" id="joblist">${data.jobs.map(jobCard).join('') || `<div class="card empty">No jobs here. ${jobFilter.status === 'new' ? 'Click <b>Check job boards now</b>, or broaden your keywords in Settings.' : ''}</div>`}</div>`;
 
   $('#refresh').onclick = (ev) => busy(ev.target, async () => {
@@ -197,13 +201,30 @@ async function jobs() {
   $('#src').onchange = (ev) => { jobFilter.source = ev.target.value; jobs(); };
   $('#place').onchange = (ev) => { jobFilter.place = ev.target.value; jobs(); };
   $('#sort').onchange = (ev) => { jobFilter.sort = ev.target.value; jobs(); };
+  $('#hideApplied').onchange = (ev) => { jobFilter.hide = ev.target.checked ? 'applied' : ''; jobs(); };
+  if ($('#hideDupes')) $('#hideDupes').onclick = () => { jobFilter.hide = 'applied'; jobs(); };
+  if ($('#moveDupes')) $('#moveDupes').onclick = (ev) => busy(ev.target, async () => {
+    const r = await api('/api/jobs/link-applied', { method: 'POST' });
+    toast(`${r.moved} lead${r.moved === 1 ? '' : 's'} moved to Applied and linked to your applications.`);
+    refreshStatus(); jobs();
+  });
   $('#joblist').onclick = async (ev) => {
     const b = ev.target.closest('button[data-act]');
     if (!b) return;
     const id = b.closest('[data-id]').dataset.id;
     if (b.dataset.act === 'autofill') return autoFillJob(b, id);
     await busy(b, async () => {
-      if (b.dataset.act === 'applied') { await api(`/api/jobs/${encodeURIComponent(id)}/apply`, { method: 'POST' }); toast('Added to your applications.'); }
+      if (b.dataset.act === 'applied') {
+        try { await api(`/api/jobs/${encodeURIComponent(id)}/apply`, { method: 'POST' }); }
+        catch (e) {
+          if (!e.data?.duplicate) throw e;
+          const choice = await confirmDuplicate(e.data.duplicate);
+          if (choice === 'link') { await linkLead(id); return; }
+          if (choice !== 'again') return;
+          await api(`/api/jobs/${encodeURIComponent(id)}/apply`, { method: 'POST', body: { force: true } });
+        }
+        toast('Added to your applications.');
+      } else if (b.dataset.act === 'link') { await linkLead(id); return; }
       else await api(`/api/jobs/${encodeURIComponent(id)}/status`, { method: 'POST', body: { status: b.dataset.act } });
       b.closest('[data-id]').remove();
       refreshStatus();
@@ -211,15 +232,59 @@ async function jobs() {
   };
 }
 
-async function autoFillJob(btn, id) {
+// "That's the same job": attach this lead to the application you already have and take it off the list.
+async function linkLead(id) {
+  await api(`/api/jobs/${encodeURIComponent(id)}/link`, { method: 'POST' });
+  document.querySelector(`[data-id="${CSS.escape(id)}"]`)?.remove();
+  toast('Linked to your existing application and moved out of your leads.');
+  refreshStatus();
+}
+
+// Asked before applying to a job you already applied to. Resolves 'link', 'again' or null (cancel).
+function confirmDuplicate(app) {
+  return new Promise((resolve) => {
+    $('#modal-body').innerHTML = `
+      <h2>You already applied to this job</h2>
+      <p><b>${esc(app.title || 'A role')}</b> at <b>${esc(app.company)}</b>, applied ${esc(fmtDate(app.applied_at))}. Status: ${badge(app.status)}</p>
+      <p class="muted">The same job often reaches you more than once, from another job board, an alert email or a repost. Applying twice rarely helps and can look careless to a recruiter.</p>
+      <div class="actions">
+        <button class="primary" data-c="link">That's the same job, hide it</button>
+        <button data-c="again">It's a different opening, apply anyway</button>
+        <button data-c="">Cancel</button>
+      </div>`;
+    const done = (v) => { resolve(v); modal.close(); };
+    $('#modal-body').querySelectorAll('[data-c]').forEach((btn) => { btn.onclick = () => done(btn.dataset.c || null); });
+    modal.addEventListener('close', () => resolve(null), { once: true });
+    modal.showModal();
+  });
+}
+
+// One line on a job card saying what you've already done for this job or company.
+function priorNote(p) {
+  if (!p) return '';
+  if (p.level === 'same') {
+    return `<div class="prior same"><svg class="ic"><use href="#i-done"/></svg><span><b>Already applied</b> ${esc(fmtDate(p.app.applied_at))} · ${badge(p.app.status)}${p.app.title ? ` <span class="muted">as “${esc(p.app.title)}”</span>` : ''}</span>
+      <a href="#applications?q=${encodeURIComponent(p.app.company)}">View application</a></div>`;
+  }
+  const n = p.apps.length;
+  return `<div class="prior company"><span>You applied to ${n} other role${n > 1 ? 's' : ''} at ${esc(p.apps[0].company)}: ${p.apps.slice(0, 2).map((a) => `${esc(a.title || 'role not recorded')} (${esc(a.status)})`).join(', ')}${n > 2 ? '…' : ''}</span></div>`;
+}
+
+async function autoFillJob(btn, id, force = false) {
   const label = btn.innerHTML;
   btn.disabled = true;
   btn.textContent = 'Opening & filling… (about 20s)';
   let r;
   try {
-    r = await api(`/api/apply/${encodeURIComponent(id)}`, { method: 'POST' });
+    r = await api(`/api/apply/${encodeURIComponent(id)}`, { method: 'POST', body: { force } });
   } catch (e) {
     btn.disabled = false; btn.innerHTML = label;
+    if (e.data?.duplicate) { // already applied: ask before filling anything
+      const choice = await confirmDuplicate(e.data.duplicate);
+      if (choice === 'link') return linkLead(id);
+      if (choice === 'again') return autoFillJob(btn, id, true);
+      return;
+    }
     if (/Profile first/.test(e.message)) { toast(e.message, 'error'); location.hash = 'profile'; return; }
     const url = e.data?.url;
     $('#modal-body').innerHTML = `<h2>Couldn’t auto-fill this one</h2><p>${esc(e.message)}</p>
@@ -279,9 +344,11 @@ function matchedKeywords(j) {
 }
 
 function jobCard(j) {
-  return `<div class="card job with-logo" data-id="${esc(j.id)}">
+  const dup = j.prior?.level === 'same';
+  return `<div class="card job with-logo ${dup ? 'is-dup' : ''}" data-id="${esc(j.id)}">
     ${logo(j.company, { size: 'lg' })}
     <div class="grow">
+    ${priorNote(j.prior)}
     <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">
       <div><h3><a href="${safeUrl(j.url)}" target="_blank" rel="noopener noreferrer">${esc(j.title)}</a></h3>
       <div class="meta"><b>${esc(j.company)}</b> ${placeTag(j)}</div></div>
@@ -299,6 +366,7 @@ function jobCard(j) {
       ${j.status !== 'applied' && canAutoFill(j.url) ? `<button class="primary" data-act="autofill" title="Opens the application in a browser window and fills it in for you to review"><svg class="ic"><use href="#i-spark"/></svg>Auto-fill application</button>` : ''}
       <a class="btn ${j.status !== 'applied' && canAutoFill(j.url) ? '' : 'primary'}" href="${safeUrl(j.url)}" target="_blank" rel="noopener noreferrer">Open posting <svg class="ic"><use href="#i-external"/></svg></a>
       <span class="spacer"></span>
+      ${dup && j.status !== 'applied' ? `<button data-act="link" title="Link this lead to the application you already have and take it off your leads">Same job, hide it</button>` : ''}
       ${j.status !== 'applied' ? `<button class="icon-btn" data-act="applied" title="I applied: move to Applications" aria-label="I applied"><svg class="ic"><use href="#i-done"/></svg></button>` : '<span class="tag green">Applied</span>'}
       ${j.status === 'saved' ? `<button class="icon-btn on" data-act="new" title="Saved: click to unsave" aria-label="Unsave"><svg class="ic"><use href="#i-bookmark"/></svg></button>` : j.status !== 'applied' ? `<button class="icon-btn" data-act="saved" title="Save for later" aria-label="Save"><svg class="ic"><use href="#i-bookmark"/></svg></button>` : ''}
       ${j.status !== 'dismissed' && j.status !== 'applied' ? `<button class="icon-btn" data-act="dismissed" title="Not interested: hide this job" aria-label="Not interested"><svg class="ic"><use href="#i-x"/></svg></button>` : ''}
@@ -451,15 +519,24 @@ async function boards() {
 
 // ---------- applications ----------
 let appFilter = '';
+let appQuery = '';
 async function applications() {
+  const linked = new URLSearchParams(location.hash.split('?')[1] || '').get('q');
+  if (linked !== null) { appQuery = linked; appFilter = ''; history.replaceState(null, '', '#applications'); }
   const apps = await api('/api/applications');
   const counts = Object.fromEntries(STATUSES.map((s) => [s, apps.filter((a) => a.status === s).length]));
-  const shown = appFilter ? apps.filter((a) => a.status === appFilter) : apps;
+  const words = appQuery.toLowerCase().split(/\s+/).filter(Boolean);
+  const shown = apps.filter((a) => (!appFilter || a.status === appFilter)
+    && words.every((w) => `${a.company} ${a.title || ''} ${a.notes || ''}`.toLowerCase().includes(w)));
   const SOURCE_LABEL = { gmail: 'Found in Gmail', 'auto-fill': 'Auto-filled', 'job-board': 'From job leads', manual: 'Added by you' };
   view.innerHTML = `
     <div class="page-head"><div><div class="eyebrow">Your pipeline</div><h1>Applications</h1><div class="muted">${apps.length} tracked · statuses update automatically from Gmail</div></div>
       <button class="primary" id="add">+ Add application</button></div>
     ${apps.length ? `<div class="pipeline" title="Your pipeline">${STATUSES.filter((s) => counts[s]).map((s) => `<span style="width:${(counts[s] / apps.length) * 100}%;background:var(--c-${s})" title="${s}: ${counts[s]}"></span>`).join('')}</div>` : ''}
+    <div class="toolbar">
+      <input id="appq" type="search" placeholder="Did I apply? Search company or job title" value="${esc(appQuery)}" style="min-width:300px">
+      ${appQuery ? `<span class="muted">${shown.length} match${shown.length === 1 ? '' : 'es'}</span>` : ''}
+    </div>
     <div class="chips" style="margin-bottom:18px" id="appchips">
       <button class="chip ${appFilter === '' ? 'active' : ''}" data-st="">All · ${apps.length}</button>
       ${STATUSES.map((s) => `<button class="chip ${appFilter === s ? 'active' : ''}" data-st="${s}" style="text-transform:capitalize">${s} · ${counts[s]}</button>`).join('')}
@@ -477,9 +554,11 @@ async function applications() {
         </div>
         <button class="icon-btn ghost" data-act="del" title="Delete application" aria-label="Delete application"><svg class="ic"><use href="#i-x"/></svg></button>
         <div class="app-notes"><textarea data-f="notes" rows="1" placeholder="✎ Add a note…">${esc(a.notes === 'Added automatically from an email.' ? '' : a.notes)}</textarea></div>
-      </div>`).join('') || `<div class="card empty">${apps.length ? 'No applications with this status.' : 'No applications yet. Click <b>I applied</b> on a job lead, add one here, or connect Gmail and the app will pick them up from confirmation emails.'}</div>`}
+      </div>`).join('') || `<div class="card empty">${appQuery ? `No application matches “${esc(appQuery)}”, so you haven’t applied there yet.` : apps.length ? 'No applications with this status.' : 'No applications yet. Click <b>I applied</b> on a job lead, add one here, or connect Gmail and the app will pick them up from confirmation emails.'}</div>`}
     </div>`;
   $('#appchips').onclick = (ev) => { const c = ev.target.closest('[data-st]'); if (c) { appFilter = c.dataset.st; applications(); } };
+  let qt;
+  $('#appq').oninput = (ev) => { clearTimeout(qt); qt = setTimeout(() => { appQuery = ev.target.value; applications().then(() => { const q = $('#appq'); q.focus(); q.setSelectionRange(q.value.length, q.value.length); }); }, 250); };
 
   $('#add').onclick = () => openForm('Add application', `
       <div class="field"><label>Company</label><input name="company" required style="width:100%"></div>
@@ -488,7 +567,17 @@ async function applications() {
       <div class="row"><div class="field"><label>Status</label><select name="status">${STATUSES.map((s) => `<option>${s}</option>`).join('')}</select></div>
       <div class="field"><label>Date applied</label><input name="applied_at" type="date" value="${new Date().toISOString().slice(0, 10)}"></div></div>
       <div class="field"><label>Notes</label><textarea name="notes" rows="2"></textarea></div>`,
-    async (d) => { await api('/api/applications', { method: 'POST', body: { ...d, applied_at: d.applied_at ? `${d.applied_at}T12:00:00` : undefined } }); route(); });
+    async (d) => {
+      const body = { ...d, applied_at: d.applied_at ? `${d.applied_at}T12:00:00` : undefined };
+      try { await api('/api/applications', { method: 'POST', body }); }
+      catch (e) {
+        if (!e.data?.duplicate) throw e;
+        const a = e.data.duplicate;
+        if (!confirm(`You already have this one: ${a.title || 'a role'} at ${a.company}, applied ${fmtDate(a.applied_at)} (status: ${a.status}).\n\nAdd it again anyway?`)) return;
+        await api('/api/applications', { method: 'POST', body: { ...body, force: true } });
+      }
+      route();
+    });
 
   const tbody = $('#apps');
   if (!tbody) return;

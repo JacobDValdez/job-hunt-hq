@@ -292,3 +292,18 @@ dialog .eyebrow { margin-bottom: 4px; }
   .hero .cta { position: static; margin-top: 14px; }
   .explain { grid-template-columns: 1fr; }
 }
+
+/* ---------- Already applied: warnings on job leads ---------- */
+.check-inline { display: inline-flex; align-items: center; gap: 7px; font-weight: 500; color: var(--muted); padding: 0 4px; }
+.applied-note { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.applied-note .row { flex: none; gap: 8px; }
+.applied-note .row > * { flex: none; }
+.prior { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: -2px 0 10px; padding: 8px 12px; border-radius: 10px; font-size: 13px; }
+.prior .ic { width: 16px; height: 16px; flex: none; }
+.prior > span { flex: 1; min-width: 200px; }
+.prior a { font-weight: 600; white-space: nowrap; }
+.prior.same { background: var(--amber-soft); color: #5b4210; border: 1px solid #ecd6a8; }
+.prior.same a { color: #7a5512; }
+.prior.company { background: #f4f1ea; color: var(--muted); padding: 6px 12px; }
+.card.job.is-dup { border-color: #ecd6a8; }
+.card.job.is-dup h3 a { color: var(--muted); }

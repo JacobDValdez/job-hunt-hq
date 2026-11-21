@@ -16,6 +16,7 @@ const { getLogo } = await import('./logos.js');
 const profileMod = await import('./profile.js');
 const applyMod = await import('./apply.js');
 const skillsMod = await import('./skills.js');
+const appliedMod = await import('./applied.js');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -67,7 +68,7 @@ function resumeSkills() {
 }
 
 app.get('/api/jobs', (req, res) => {
-  const { status = 'new', q = '', source = '', place = '', sort = '' } = req.query;
+  const { status = 'new', q = '', source = '', place = '', sort = '', hide = '' } = req.query;
   const where = [];
   const params = [];
   if (status !== 'all') { where.push('status = ?'); params.push(status); }
@@ -77,16 +78,63 @@ app.get('/api/jobs', (req, res) => {
   if (q) { where.push('(title LIKE ? OR company LIKE ? OR location LIKE ?)'); params.push(`%${q}%`, `%${q}%`, `%${q}%`); }
   const byMatch = sort === 'match';
   let rows = db.prepare(`SELECT * FROM jobs ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-    ORDER BY score DESC, COALESCE(posted_at, fetched_at) DESC LIMIT ${byMatch ? 2000 : 300}`).all(...params);
+    ORDER BY score DESC, COALESCE(posted_at, fetched_at) DESC LIMIT 5000`).all(...params);
+  // Check every lead (not just the first page) against your applications, so the count and the
+  // "hide" switch cover leads that sort below the top 300 too.
+  const index = appliedMod.appliedIndex();
+  rows = rows.map((j) => ({ ...j, prior: j.status === 'applied' ? null : appliedMod.priorApplication(j, index) }));
+  const alreadyApplied = rows.filter((j) => j.prior?.level === 'same').length;
+  if (hide === 'applied') rows = rows.filter((j) => j.prior?.level !== 'same');
   const mine = resumeSkills();
-  rows = rows.map((j) => ({ ...j, match: mine.size ? skillsMod.matchJob(j, mine) : null }));
+  const withMatch = (list) => list.map((j) => ({ ...j, match: mine.size ? skillsMod.matchJob(j, mine) : null }));
   if (byMatch) {
     // Best fit first: match %, then search relevance. Jobs too vague to score go last.
+    rows = withMatch(rows.slice(0, 2000));
     rows.sort((a, b) => (b.match?.pct ?? -1) - (a.match?.pct ?? -1) || b.score - a.score);
     rows = rows.slice(0, 300);
+  } else {
+    rows = withMatch(rows.slice(0, 300));
   }
   const sources = db.prepare(`SELECT source, COUNT(*) n FROM jobs WHERE status = 'new' GROUP BY source ORDER BY source`).all();
-  res.json({ jobs: rows, sources, hasResume: mine.size > 0 });
+  res.json({ jobs: rows, sources, hasResume: mine.size > 0, alreadyApplied });
+});
+
+// A lead you already applied to: say so before doing anything that would apply again.
+function duplicateOf(job, force) {
+  if (force) return null;
+  const prior = appliedMod.priorApplication(job);
+  return prior?.level === 'same' && prior.how !== 'this lead' ? prior.app : null;
+}
+const duplicateError = (app) => ({
+  error: `You already applied to ${app.title || 'a job'} at ${app.company} on ${new Date(app.applied_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} (status: ${app.status}).`,
+  duplicate: app,
+});
+
+// "That's the same job": link this lead to the application you already have, and take it off your leads.
+app.post('/api/jobs/:id/link', (req, res) => {
+  const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  const prior = appliedMod.priorApplication(job);
+  const appId = Number(req.body?.application_id) || (prior?.level === 'same' ? prior.app.id : null);
+  if (!appId) return res.status(400).json({ error: 'No matching application to link to' });
+  db.prepare('UPDATE applications SET job_id = COALESCE(job_id, ?), url = COALESCE(NULLIF(url, \'\'), ?), title = COALESCE(NULLIF(title, \'\'), ?) WHERE id = ?')
+    .run(job.id, job.url, job.title, appId);
+  db.prepare(`UPDATE jobs SET status = 'applied' WHERE id = ?`).run(job.id);
+  res.json({ ok: true, application_id: appId });
+});
+
+// Hide every lead that's a job you already applied to, in one go.
+app.post('/api/jobs/link-applied', (req, res) => {
+  const index = appliedMod.appliedIndex();
+  const open = db.prepare(`SELECT * FROM jobs WHERE status IN ('new', 'saved')`).all();
+  const setStatus = db.prepare(`UPDATE jobs SET status = 'applied' WHERE id = ?`);
+  const link = db.prepare(`UPDATE applications SET job_id = COALESCE(job_id, ?), url = COALESCE(NULLIF(url, ''), ?) WHERE id = ?`);
+  let n = 0;
+  for (const j of open) {
+    const p = appliedMod.priorApplication(j, index);
+    if (p?.level === 'same') { setStatus.run(j.id); link.run(j.id, j.url, p.app.id); n++; }
+  }
+  res.json({ ok: true, moved: n });
 });
 
 // Which skills your leads ask for most, and which your resume already shows (like a career report).
@@ -118,6 +166,8 @@ app.post('/api/jobs/:id/status', (req, res) => {
 app.post('/api/jobs/:id/apply', (req, res) => {
   const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(req.params.id);
   if (!job) return res.status(404).json({ error: 'Job not found' });
+  const dup = duplicateOf(job, req.body?.force);
+  if (dup) return res.status(409).json(duplicateError(dup));
   const existing = db.prepare('SELECT id FROM applications WHERE job_id = ?').get(job.id);
   if (!existing) {
     db.prepare(`INSERT INTO applications (job_id, company, title, url, status, applied_at, last_activity, source)
@@ -138,9 +188,11 @@ app.get('/api/applications', (req, res) => {
 });
 
 app.post('/api/applications', (req, res) => {
-  const { company, title = '', url = '', status = 'applied', notes = '', applied_at } = req.body;
+  const { company, title = '', url = '', status = 'applied', notes = '', applied_at, force } = req.body;
   if (!company?.trim()) return res.status(400).json({ error: 'Company is required' });
   if (!APP_STATUSES.includes(status)) return res.status(400).json({ error: 'Bad status' });
+  const dup = force ? null : appliedMod.existingApplication(company, title);
+  if (dup) return res.status(409).json(duplicateError(dup));
   const when = applied_at ? new Date(applied_at).toISOString() : nowIso();
   const r = db.prepare(`INSERT INTO applications (company, title, url, status, notes, applied_at, last_activity, source)
     VALUES (?, ?, ?, ?, ?, ?, ?, 'manual')`).run(company.trim(), title, url, status, notes, when, when);
@@ -250,6 +302,9 @@ app.get('/api/profile/resume', (req, res) => {
 });
 
 app.post('/api/apply/:id', async (req, res) => {
+  const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(req.params.id);
+  const dup = job && duplicateOf(job, req.body?.force);
+  if (dup) return res.status(409).json(duplicateError(dup));
   try { res.json(await applyMod.autoFill(req.params.id)); } catch (e) { res.status(400).json({ error: e.message, url: e.url || null }); }
 });
 app.post('/api/apply/:id/done', wrap(async (req, res) => {
